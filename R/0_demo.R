@@ -32,6 +32,7 @@ library(whitebox)
 library(stars)
 library(fasterize)
 library(mapview)
+library(parallel)
 
 #Define dir of interest
 data_dir<-"data/I_data/"
@@ -197,7 +198,7 @@ streams<-stream_fun(dem, threshold_m2=2500, scratch_dir)
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #4.1 Define XS location along flowline ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #Define distance between cross sections
-dist<- 100 #m
+dist<- 50 #m
 
 #Estimate number of cross sections to create based on distance
 n_points<-sum(st_length(streams))/dist 
@@ -271,6 +272,12 @@ mapview(
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #5.1 Create function to extract elevation data~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 elevation_fun<-function(n){
+  
+  #Call Libraries of interest
+  library(tidyverse) #join the cult!
+  library(raster)
+  library(sf)
+  
   #isolate xs
   xs_temp<-xs[n,]
   
@@ -299,8 +306,8 @@ elevation_fun<-function(n){
   #Interpolate in the x and y directions
   interp_fun<-approxfun(xs_temp$dist, xs_temp$ele)
   xs_temp<-tibble(
-    dist = seq(0, max(xs_temp$dist), 0.1),
-    ele  = interp_fun(seq(0, max(xs_temp$dist), 0.1)), 
+    dist = seq(0, max(xs_temp$dist), 1),
+    ele  = interp_fun(seq(0, max(xs_temp$dist), 1)), 
     xs_id = n)
   
   #Export data
@@ -308,8 +315,116 @@ elevation_fun<-function(n){
 }
 
 #5.2 Execute function~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-xs_ele<-lapply(X=seq(1, nrow(xs)), elevation_fun)
+#Define number of cores
+n_cores<-detectCores()-1
 
+#Create cores
+cl<-makeCluster(n_cores)
 
+#Send xs data to cores
+clusterExport(cl, c('dem','xs'))
 
+#Apply function
+xs_ele<-parLapply(cl, X=seq(1, nrow(xs)), fun = elevation_fun) %>% bind_rows()
 
+#Stop clusters
+stopCluster(cl)
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#Step 6: Estimate XS area, w/d ratio, and geomorphic unit  ---------------------
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#6.1 Create function ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+xs_metrics_fun<-function(n){
+  
+  #Call Libraries of interest
+  library(tidyverse) #join the cult!
+  
+  #Identify XS of interest
+  id<-xs_ele %>% dplyr::select(xs_id) %>% unique()
+  id<-id$xs_id[n]
+  
+  #Isolate data
+  xs_ele<-xs_ele %>% filter(xs_id == id)
+  
+  #Identify the valley bottom
+  invert_ele<-xs_ele %>% 
+    filter(dist>95, dist<105) %>% 
+    filter(ele == min(ele)) %>% 
+    dplyr::select(ele) %>% pull()
+  
+  invert_dist<-xs_ele %>% 
+    filter(dist>95, dist<105) %>% 
+    filter(ele == min(ele)) %>% 
+    dplyr::select(dist) %>% pull()
+  
+  #Create function to estimate metrics from XS
+  metrics_fun<-function(dz){
+    #Identify points below invert_ele + dz
+    df<-xs_ele %>% filter(ele <= invert_ele+dz)
+    
+    #Define groups of connected points
+    df<-df %>% 
+      mutate(dx = dist-lag(dist), 
+             dx = replace_na(dx,0)) %>% 
+      mutate(group_marker = ifelse(dx==1,0,1)) %>% 
+      mutate(group = cumsum(group_marker)) 
+    
+    #Identify area connected to channel in question
+    xs_group<-df %>% 
+      filter(dist==invert_dist) %>% 
+      dplyr::select(group) %>% 
+      pull()
+    
+    #Limit xs to chanel/valley in question
+    df<-df %>% filter(group==xs_group) %>% dplyr::select(-group) %>% dplyr::select(-group_marker) %>% dplyr::select(-dx)
+    
+    #Estimate metrics
+    #XS Area
+    output<-df %>% 
+      mutate(
+        dx_lag = (dist - lag(dist))/2,
+        dx_lag = replace_na(dx_lag,0), 
+        dx_lead = (lead(dist)-dist)/2, 
+        dx_lead = replace_na(dx_lead,0), 
+        dx = dx_lag + dx_lead, 
+        dy = (dz + invert_ele) - ele, 
+        dA = dx*dy) %>% 
+      summarise(
+        dz = dz,
+        a_xs = sum(dA), 
+        d_mean = mean(dy),
+        w_mean = a_xs/d_mean,
+        d_max = dz, 
+        w_max = max(dist)-min(dist), 
+        w_d_ratio = w_max/d_max)
+      
+    #Export output
+    output 
+  }
+  
+  #Apply metrics
+  dz<-max(xs_ele$ele)-invert_ele
+  metrics<-lapply(X=seq(0,dz,by=0.05), FUN = metrics_fun) %>% bind_rows()
+  
+  #Add Unique ID
+  metrics<-metrics %>% mutate(xs_id = id)
+  
+  #Export metrics
+  metrics
+}
+
+#6.2 Execute function~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#Define number of cores
+n_cores<-detectCores()-1
+
+#Create cores
+cl<-makeCluster(n_cores)
+
+#Send xs data to cores
+clusterExport(cl, c('xs_ele'))
+
+#Apply function
+xs_ele<-parLapply(cl, X=seq(1, nrow(xs)), fun = xs_metrics_fun) %>% bind_rows()
+
+#Stop clusters
+stopCluster(cl)
