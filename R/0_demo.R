@@ -30,6 +30,8 @@ library(raster)
 library(sf)
 library(whitebox)
 library(stars)
+library(fasterize)
+library(mapview)
 
 #Define dir of interest
 data_dir<-"data/I_data/"
@@ -210,7 +212,7 @@ stream_pnts<-st_as_sf(stream_pnts)
 
 #4.2 Define XS ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #Create fun to create cross sections
-xs_fun<-function(n, width=100){
+xs_fun<-function(n, width=200){
   #For testing
   pnt<-stream_pnts[n,]
   
@@ -252,7 +254,7 @@ xs_fun<-function(n, width=100){
 }
 
 #Apply function
-xs <- lapply(X=seq(1, nrow(stream_pnts)), FUN = xs_fun) %>% bind_rows(xs)
+xs <- lapply(X=seq(1, nrow(stream_pnts)), FUN = xs_fun) %>% bind_rows(.)
 
 #4.3 Plot for funzies ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #Plot for funzies
@@ -263,3 +265,51 @@ mapview(
   mapview(streams, color=c("dark blue"))+
   mapview(stream_pnts, col.regions=c("dark orange")) +
   mapview(xs, color=c("dark red"))
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#Step 5: Extract elevation data ------------------------------------------------
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#5.1 Create function to extract elevation data~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+elevation_fun<-function(n){
+  #isolate xs
+  xs_temp<-xs[n,]
+  
+  #convert to raster
+  m<-dem*0+1
+  m<-crop(m, st_buffer(xs_temp,250))
+  xs_temp<-rasterize(xs_temp, m)
+  
+  #Add values
+  xs_temp<-xs_temp*dem
+  
+  #Convert to points
+  xs_temp<-rasterToPoints(xs_temp)
+
+  #Convert to 2D XS
+  xs_temp <- xs_temp %>% 
+    #Convert to tibble
+    as_tibble() %>% 
+    #Estimate distance along transect using distance formula
+    mutate(
+      dist = ((x[1]-x)^2 + (y[1]-y)^2)^0.5
+    ) %>% 
+    #Select cols of interest
+    dplyr::select(dist, ele = layer)
+  
+  #Interpolate in the x and y directions
+  interp_fun<-approxfun(xs_temp$dist, xs_temp$ele)
+  xs_temp<-tibble(
+    dist = seq(0, max(xs_temp$dist), 0.1),
+    ele  = interp_fun(seq(0, max(xs_temp$dist), 0.1)), 
+    xs_id = n)
+  
+  #Export data
+  xs_temp
+}
+
+#5.2 Execute function~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+xs_ele<-lapply(X=seq(1, nrow(xs)), elevation_fun)
+
+
+
+
