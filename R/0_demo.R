@@ -424,7 +424,22 @@ cl<-makeCluster(n_cores)
 clusterExport(cl, c('xs_ele'))
 
 #Apply function
-xs_ele<-parLapply(cl, X=seq(1, nrow(xs)), fun = xs_metrics_fun) %>% bind_rows()
+xs_metrics<-parLapply(cl, X=seq(1, nrow(xs)), fun = xs_metrics_fun) %>% bind_rows()
 
 #Stop clusters
 stopCluster(cl)
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#Step 7: Identify of entrenchment  ---------------------
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+
+m<-mapview(
+  dem,
+  alpha.regions=0.9,
+  map.types=c("OpenTopoMap")) +
+  mapview(streams, color=c("dark blue"))+
+  mapview(stream_pnts, col.regions=c("dark orange")) +
+  mapview(xs, color=c("dark red"))
+
+htmlwidgets::saveWidget(m, "initial_map.html")
